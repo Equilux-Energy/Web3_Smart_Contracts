@@ -604,6 +604,14 @@ contract EnergyMarketplace is
     }
 
     /**
+     * @dev Grant admin role to an address
+     * @param _account Address to grant the role to
+     */
+    function addAdmin(address _account) external onlyRole(ADMIN_ROLE) {
+        grantRole(ADMIN_ROLE, _account);
+    }
+
+    /**
      * @dev Revoke moderator role from an address
      * @param _account Address to revoke the role from
      */
