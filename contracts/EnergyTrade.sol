@@ -10,7 +10,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
     using SafeERC20 for IERC20;
-    
+
     IERC20 public energyToken;
     bytes32 private constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant CONSUMER_ROLE = keccak256("CONSUMER_ROLE");
@@ -62,6 +62,9 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
     uint256 public offerCounter;
     uint256 public tradeCounter;
     uint256 public bargainCounter;
+
+    uint256 public sellerRewardPercentage = 5; // 5% reward
+    address public rewardPoolAddress;
 
     modifier onlyRegistered() {
         require(participants[msg.sender].isRegistered, "Not registered");
@@ -120,6 +123,7 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
         address indexed resolver,
         string resolution
     );
+    event SellerRewarded(address indexed seller, uint256 rewardAmount);
 
     constructor(address tokenAddress) {
         energyToken = IERC20(tokenAddress);
@@ -195,8 +199,19 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
         bargain.isAccepted = true;
         emit BargainAccepted(bargainId, bargain.proposer, msg.sender);
 
-        // Start the energy transfer process
-        purchaseEnergy(bargain.proposer, bargain.amount, bargain.pricePerUnit);
+        // Create a new offer from the bargain
+        offerCounter++;
+        energyOffers[offerCounter] = EnergyOffer(
+            bargain.proposer,
+            bargain.amount,
+            bargain.pricePerUnit,
+            true,
+            0,
+            0
+        );
+
+        // Purchase the energy from the newly created offer
+        purchaseEnergy(offerCounter, bargain.amount);
     }
 
     function rejectBargain(
@@ -211,45 +226,44 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
     }
 
     function purchaseEnergy(
-        address proposer,
-        uint256 amount,
-        uint256 pricePerUnit
+        uint256 offerId,
+        uint256 amount
     ) public onlyRole(CONSUMER_ROLE) whenNotPaused nonReentrant {
-        offerCounter++;
-        energyOffers[offerCounter] = EnergyOffer(
-            proposer,
-            amount,
-            pricePerUnit,
-            true,
-            0,
-            0
-        );
+        EnergyOffer storage offer = energyOffers[offerId];
+        require(offer.isActive, "Offer not active");
+        require(offer.amount >= amount, "Insufficient energy available");
 
-        uint256 totalPrice = amount * pricePerUnit;
+        uint256 totalPrice = amount * offer.pricePerUnit;
         require(
             energyToken.transferFrom(msg.sender, address(this), totalPrice),
             "Token transfer failed"
         );
 
-        energyOffers[offerCounter].escrowedAmount += totalPrice;
-        energyOffers[offerCounter].paymentStage = 0;
+        // Update the offer
+        offer.amount -= amount;
+        if (offer.amount == 0) {
+            offer.isActive = false;
+        }
+
+        offer.escrowedAmount += totalPrice;
+        offer.paymentStage = 0;
 
         tradeCounter++;
         tradeHistory[msg.sender].push(
             Trade(
                 tradeCounter,
                 msg.sender,
-                proposer,
+                offer.producer,
                 amount,
                 totalPrice,
                 block.timestamp
             )
         );
-        tradeHistory[proposer].push(
+        tradeHistory[offer.producer].push(
             Trade(
                 tradeCounter,
                 msg.sender,
-                proposer,
+                offer.producer,
                 amount,
                 totalPrice,
                 block.timestamp
@@ -258,7 +272,7 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
 
         emit EnergyPurchased(
             msg.sender,
-            proposer,
+            offer.producer,
             amount,
             totalPrice,
             tradeCounter
@@ -275,6 +289,18 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
         uint256 paymentAmount = offer.escrowedAmount / 4;
         offer.paymentStage++;
         energyToken.safeTransfer(offer.producer, paymentAmount);
+
+        // Add reward if payment is complete
+        if (offer.paymentStage == 4 && rewardPoolAddress != address(0)) {
+            uint256 rewardAmount = (offer.escrowedAmount *
+                sellerRewardPercentage) / 100;
+            energyToken.safeTransferFrom(
+                rewardPoolAddress,
+                offer.producer,
+                rewardAmount
+            );
+            emit SellerRewarded(offer.producer, rewardAmount);
+        }
 
         emit PaymentReleased(
             msg.sender,
@@ -357,7 +383,16 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
     }
 
     function getEnergyOffers() external view returns (EnergyOffer[] memory) {
-        EnergyOffer[] memory offers = new EnergyOffer[](offerCounter);
+        // First count active offers
+        uint256 activeOfferCount = 0;
+        for (uint256 i = 1; i <= offerCounter; i++) {
+            if (energyOffers[i].isActive) {
+                activeOfferCount++;
+            }
+        }
+
+        // Then populate the array with only active offers
+        EnergyOffer[] memory offers = new EnergyOffer[](activeOfferCount);
         uint256 counter = 0;
         for (uint256 i = 1; i <= offerCounter; i++) {
             if (energyOffers[i].isActive) {
@@ -390,5 +425,26 @@ contract EnergyTrade is ReentrancyGuard, Pausable, AccessControl {
     function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
         emit EmergencyStopDeactivated();
+    }
+
+    function assignConsumerRole(address user) external onlyRole(ADMIN_ROLE) {
+        _grantRole(CONSUMER_ROLE, user);
+    }
+
+    function assignProducerRole(address user) external onlyRole(ADMIN_ROLE) {
+        _grantRole(PRODUCER_ROLE, user);
+    }
+
+    function setSellerRewardPercentage(
+        uint256 _percentage
+    ) external onlyRole(ADMIN_ROLE) {
+        require(_percentage <= 20, "Reward too high"); // Cap at 20%
+        sellerRewardPercentage = _percentage;
+    }
+
+    function setRewardPoolAddress(
+        address _rewardPoolAddress
+    ) external onlyRole(ADMIN_ROLE) {
+        rewardPoolAddress = _rewardPoolAddress;
     }
 }
