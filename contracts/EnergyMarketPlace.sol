@@ -18,7 +18,7 @@ contract EnergyMarketplace is
     AccessControl,
     Ownable
 {
-    // Define roles
+    // Define roles for contract access
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant MODERATOR_ROLE = keccak256("MODERATOR_ROLE");
     bytes32 public constant USER_ROLE = keccak256("USER_ROLE");
