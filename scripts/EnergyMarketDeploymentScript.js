@@ -2,6 +2,8 @@ const hre = require("hardhat");
 const fs = require("fs");
 require("dotenv").config();
 
+
+
 async function main() {
   // Get network name from hardhat
   const networkName = hre.network.name.toUpperCase();

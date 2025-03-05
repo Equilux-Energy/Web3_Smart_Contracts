@@ -287,9 +287,9 @@ contract EnergyEscrow is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
-     * @dev Update the marketplace contract address
-     * @param _newMarketplace New marketplace contract address
-     * Only callable by owner
+     * @notice Updates the address of the marketplace contract.
+     * @dev This function can only be called by the owner of the contract.
+     * @param _newMarketplace The address of the new marketplace contract.
      */
     function updateMarketplaceContract(
         address _newMarketplace

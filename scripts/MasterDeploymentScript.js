@@ -3,7 +3,6 @@ const fs = require("fs");
 require("dotenv").config();
 
 async function main() {
-  // Get network name from hardhat
   const networkName = hre.network.name;
   const NETWORK_KEY = networkName.toUpperCase();
 
@@ -51,17 +50,22 @@ async function deployOrGetToken(networkKey) {
   // Deploy new token
   const initialSupply = getInitialTokenSupply(hre.network.name);
   const EnergyToken = await hre.ethers.getContractFactory("EnergyToken");
+
+  // Deploy the contract
+  console.log("⏳ Deploying EnergyToken...");
   const token = await EnergyToken.deploy("Equilux Token", "EQT", initialSupply);
 
-  console.log("⏳ Waiting for EnergyToken deployment to complete...");
-  await token.deployed();
+  // Wait for deployment to complete and get address using ethers v6 method
+  console.log("⏳ Waiting for deployment transaction confirmation...");
+  await token.waitForDeployment();
+  const tokenAddress = await token.getAddress();
 
-  console.log(`✅ EnergyToken deployed to: ${token.address}`);
+  console.log(`✅ EnergyToken deployed to: ${tokenAddress}`);
 
   // Update .env file
-  updateEnvFile(tokenAddressKey, token.address);
+  updateEnvFile(tokenAddressKey, tokenAddress);
 
-  return token.address;
+  return tokenAddress;
 }
 
 async function deployMarketplace(tokenAddress) {
@@ -73,16 +77,18 @@ async function deployMarketplace(tokenAddress) {
   );
   const marketplace = await EnergyMarketplace.deploy(tokenAddress);
 
-  console.log("⏳ Waiting for EnergyMarketplace deployment to complete...");
-  await marketplace.deployed();
+  // Wait for deployment to complete and get address using ethers v6 method
+  console.log("⏳ Waiting for deployment transaction confirmation...");
+  await marketplace.waitForDeployment();
+  const marketplaceAddress = await marketplace.getAddress();
 
-  console.log(`✅ EnergyMarketplace deployed to: ${marketplace.address}`);
+  console.log(`✅ EnergyMarketplace deployed to: ${marketplaceAddress}`);
 
   // Update .env file
   const marketplaceAddressKey = `CONTRACT_ENERGY_TRADE_ADDRESS_${hre.network.name.toUpperCase()}`;
-  updateEnvFile(marketplaceAddressKey, marketplace.address);
+  updateEnvFile(marketplaceAddressKey, marketplaceAddress);
 
-  return marketplace.address;
+  return marketplaceAddress;
 }
 
 async function getEscrowAddress(marketplaceAddress) {
