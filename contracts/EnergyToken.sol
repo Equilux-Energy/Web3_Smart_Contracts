@@ -21,7 +21,7 @@ interface IERC677Receiver {
 }
 
 contract EnergyToken is ERC20, Ownable {
-    uint256 public rate = 10000; // Number of tokens per Ether
+    uint256 public rate = 2150; // Number of tokens per Ether
 
     /**
      * @dev Sets the values for {name}, {symbol}, and {initialAmount}.
@@ -98,7 +98,12 @@ contract EnergyToken is ERC20, Ownable {
      * The number of tokens received is determined by the `rate`.
      */
     function buyTokens() external payable {
-        uint256 tokenAmount = msg.value * rate;
+        require(_msgSender() != address(0), "Address must be non-zero");
+
+        uint256 tokenAmount = (msg.value * rate) / 1 ether;
+
+        require(tokenAmount > 0, "Not enough Ether provided");
+
         require(
             totalSupply() + tokenAmount <= cap(),
             "Not enough tokens available to mint"
@@ -120,7 +125,7 @@ contract EnergyToken is ERC20, Ownable {
      * @return The cap on the token's total supply.
      */
     function cap() public view returns (uint256) {
-        return 1000000 * 10 ** decimals(); // Example cap, adjust as needed
+        return 10000000000 * 10 ** decimals(); // Example cap, adjust as needed
     }
 
     /**

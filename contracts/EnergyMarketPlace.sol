@@ -6,9 +6,7 @@ import "./EnergyEscrow.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title EnergyMarketplace
@@ -23,8 +21,12 @@ contract EnergyMarketplace is
     // Define roles
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant MODERATOR_ROLE = keccak256("MODERATOR_ROLE");
+    bytes32 public constant USER_ROLE = keccak256("USER_ROLE");
     // Add a dispute period
     uint256 public constant DISPUTE_PERIOD = 24 hours;
+
+    // Funding timeout: buyer must fund within 24 hours
+    uint256 public constant FUNDING_TIMEOUT = 24 hours;
 
     // Reference to the energy token
     EnergyToken public energyToken;
@@ -89,6 +91,8 @@ contract EnergyMarketplace is
         uint256 agreedAt;
         bytes32 escrowId;
         bool isActive;
+        uint256 fundingDeadline;
+        bool funded;
         mapping(uint256 => MilestoneCompletion) milestones;
     }
 
@@ -139,6 +143,9 @@ contract EnergyMarketplace is
         uint256 percentage,
         string reason
     );
+
+    event AgreementFunded(bytes32 indexed agreementId);
+    event AgreementCancelled(bytes32 indexed agreementId, string reason);
 
     /**
      * @dev Constructor to set the energy token address
@@ -191,20 +198,20 @@ contract EnergyMarketplace is
         uint256 _pricePerUnit,
         uint256 _startTime,
         uint256 _endTime
-    ) external whenNotPaused nonReentrant returns (bytes32 offerId) {
-        require(_energyAmount > 0, "Energy amount must be greater than zero");
-        require(_pricePerUnit > 0, "Price per unit must be greater than zero");
+    )
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRole(USER_ROLE)
+        returns (bytes32 offerId)
+    {
+        require(_energyAmount > 0, "Energy amount must be > 0");
+        require(_pricePerUnit > 0, "Price per unit must be > 0");
         require(_endTime > _startTime, "End time must be after start time");
-        require(
-            _startTime > block.timestamp,
-            "Start time must be in the future"
-        );
+        require(_startTime > block.timestamp, "Start time must be in future");
 
         uint256 totalPrice = _energyAmount * _pricePerUnit;
-
-        // Generate a unique hash-based ID
         offerId = generateUniqueId(msg.sender, uint256(uint160(_offerType)));
-
         offers[offerId] = Offer({
             id: offerId,
             creator: msg.sender,
@@ -220,13 +227,9 @@ contract EnergyMarketplace is
         });
 
         userOffers[msg.sender].push(offerId);
-
-        // Add to active offers
         activeOfferIds.push(offerId);
         activeOfferIndexes[offerId] = activeOfferIds.length - 1;
-
         emit OfferCreated(offerId, msg.sender, _offerType);
-
         return offerId;
     }
 
@@ -236,7 +239,7 @@ contract EnergyMarketplace is
         uint256 _pricePerUnit,
         uint256 _startTime,
         uint256 _endTime
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused nonReentrant onlyRole(USER_ROLE) {
         Offer storage offer = offers[_offerId];
         require(offer.id == _offerId, "Offer does not exist");
         require(msg.sender == offer.creator, "Only creator can update offer");
@@ -272,21 +275,21 @@ contract EnergyMarketplace is
      * @param _proposedPrice New proposed price (0 if not proposing a new price)
      * @param _proposedEnergyAmount New proposed energy amount (0 if not proposing a new amount)
      */
+    // A user can add a negotiation message that may propose modifications to the price or energy amount.
     function addNegotiationMessage(
         bytes32 _offerId,
         string calldata _message,
         uint256 _proposedPrice,
         uint256 _proposedEnergyAmount
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused nonReentrant onlyRole(USER_ROLE) {
         Offer storage offer = offers[_offerId];
         require(offer.id == _offerId, "Offer does not exist");
         require(
             offer.status == OfferStatus.ACTIVE ||
                 offer.status == OfferStatus.NEGOTIATING,
-            "Offer is not open for negotiation"
+            "Offer not open for negotiation"
         );
 
-        // Update offer status if this is the first negotiation
         if (offer.status == OfferStatus.ACTIVE) {
             offer.status = OfferStatus.NEGOTIATING;
             emit OfferUpdated(_offerId, OfferStatus.NEGOTIATING);
@@ -301,63 +304,108 @@ contract EnergyMarketplace is
                 proposedEnergyAmount: _proposedEnergyAmount
             })
         );
-
         emit NegotiationMessageAdded(_offerId, msg.sender);
+    }
+
+    /**
+     * @dev Accept a negotiation and proceed to agreement
+     * @param _offerId ID of the offer
+     */
+    function acceptNegotiation(
+        bytes32 _offerId
+    ) external whenNotPaused nonReentrant {
+        Offer storage offer = offers[_offerId];
+
+        require(offer.id == _offerId, "Offer does not exist");
+        require(
+            offer.status == OfferStatus.NEGOTIATING,
+            "Offer is not in negotiation"
+        );
+        require(
+            offer.counterparty == msg.sender,
+            "Only the designated counterparty can accept"
+        );
+        require(
+            msg.sender != offer.creator,
+            "Offer creator cannot accept their own negotiation"
+        );
+
+        // Set the counterparty and update status to AGREED
+        offer.counterparty = msg.sender;
+        offer.status = OfferStatus.AGREED;
+
+        emit OfferUpdated(_offerId, OfferStatus.AGREED);
+    }
+
+    /**
+     * @dev Cancel a negotiation and revert to active status
+     * @param _offerId ID of the offer
+     */
+    function cancelNegotiation(
+        bytes32 _offerId
+    ) external whenNotPaused nonReentrant {
+        Offer storage offer = offers[_offerId];
+
+        require(offer.id == _offerId, "Offer does not exist");
+        require(
+            msg.sender == offer.creator,
+            "Only the offer creator can cancel negotiation"
+        );
+        require(
+            offer.status == OfferStatus.NEGOTIATING,
+            "Offer is not in negotiation"
+        );
+
+        // Reset status back to ACTIVE
+        offer.status = OfferStatus.ACTIVE;
+        offer.counterparty = address(0); // Clear counterparty
+
+        emit OfferUpdated(_offerId, OfferStatus.ACTIVE);
     }
 
     /**
      * @dev Create a trade agreement from an offer
      * @param _offerId ID of the offer
-     * @param _finalPrice Final agreed total price
      * @return agreementId ID of the created agreement
      */
     function createAgreement(
-        bytes32 _offerId,
-        uint256 _finalPrice,
-        uint256 _finalEnergyAmount
-    ) external whenNotPaused nonReentrant returns (bytes32) {
+        bytes32 _offerId
+    )
+        external
+        whenNotPaused
+        nonReentrant
+        onlyRole(USER_ROLE)
+        returns (bytes32)
+    {
         Offer storage offer = offers[_offerId];
+        uint256 _finalPrice = offer.totalPrice;
+        uint256 _finalEnergyAmount = offer.energyAmount;
         require(offer.id == _offerId, "Offer does not exist");
         require(
-            offer.status == OfferStatus.ACTIVE ||
-                offer.status == OfferStatus.NEGOTIATING,
-            "Offer is not available for agreement"
+            offer.status == OfferStatus.AGREED,
+            "Offer must be agreed upon before creating an agreement"
         );
 
-        // Validate the final energy amount
-        require(
-            _finalEnergyAmount > 0,
-            "Energy amount must be greater than zero"
-        );
+        require(_finalEnergyAmount > 0, "Energy amount must be > 0");
 
         address buyer;
         address seller;
-
         if (offer.offerType == OfferType.BUY) {
             buyer = offer.creator;
             seller = msg.sender;
             require(msg.sender != buyer, "Cannot agree to your own offer");
         } else {
-            // OfferType.SELL
             seller = offer.creator;
             buyer = msg.sender;
             require(msg.sender != seller, "Cannot agree to your own offer");
         }
 
-        // Generate unique agreement ID
         bytes32 agreementId = generateUniqueId(
             msg.sender,
             uint256(_finalPrice)
         );
 
-        // Update the offer
-        offer.status = OfferStatus.AGREED;
-        offer.counterparty = msg.sender;
-
-        // Remove from active offers
-        _removeFromActiveOffers(_offerId);
-
-        // Create an escrow for the trade
+        // Create a new escrow record for this agreement.
         bytes32 escrowId = escrowContract.createEscrow(
             buyer,
             seller,
@@ -365,7 +413,25 @@ contract EnergyMarketplace is
             _finalPrice
         );
 
-        // Create the agreement
+        bool isFunded = false;
+        // If the buyer creates the agreement, perform immediate funding.
+        require(
+            energyToken.transferFrom(
+                buyer,
+                address(escrowContract),
+                _finalPrice
+            ),
+            "Token transfer to escrow failed"
+        );
+        escrowContract.startEscrow(escrowId);
+        isFunded = true;
+        emit AgreementFunded(agreementId);
+
+        // Update offer status and link the counterparty.
+        offer.status = OfferStatus.AGREED;
+        offer.counterparty = msg.sender;
+        _removeFromActiveOffers(_offerId);
+
         Agreement storage newAgreement = agreements[agreementId];
         newAgreement.id = agreementId;
         newAgreement.offerId = _offerId;
@@ -374,16 +440,15 @@ contract EnergyMarketplace is
         newAgreement.finalEnergyAmount = _finalEnergyAmount;
         newAgreement.finalTotalPrice = _finalPrice;
         newAgreement.agreedAt = block.timestamp;
+        newAgreement.fundingDeadline = block.timestamp + FUNDING_TIMEOUT;
         newAgreement.escrowId = escrowId;
         newAgreement.isActive = true;
+        newAgreement.funded = isFunded;
 
-        // Update user agreements
         userAgreements[buyer].push(agreementId);
         userAgreements[seller].push(agreementId);
-
         emit AgreementCreated(agreementId, _offerId, buyer, seller);
         emit OfferUpdated(_offerId, OfferStatus.AGREED);
-
         return agreementId;
     }
 
@@ -406,38 +471,115 @@ contract EnergyMarketplace is
     }
 
     /**
-     * @dev Start the energy transfer process
-     * @param _agreementId ID of the agreement
+
+     *  Funds an existing agreement.
+     * @dev This function can only be called by the buyer of the agreement.
+     * It transfers the final total price of the agreement from the buyer to the escrow contract.
+     * The agreement must be active, not already funded, and within the funding deadline.
+     * The contract must not be paused and the function is non-reentrant.
+     * @param _agreementId The unique identifier of the agreement to be funded.
+     * Requirements:
+     * The agreement must exist.
+     * The agreement must be active.
+     * The agreement must not already be funded.
+     * The current timestamp must be before or equal to the funding deadline.
+     * The caller must be the buyer of the agreement.
+     * The token transfer from the buyer to the escrow contract must succeed.
+     * Emits:
+     * AgreementFunded Emitted when the agreement is successfully funded.
      */
-    function startEnergyTransfer(
+    function fundAgreement(
         bytes32 _agreementId
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused nonReentrant onlyRole(USER_ROLE) {
         Agreement storage agreement = agreements[_agreementId];
         require(agreement.id == _agreementId, "Agreement does not exist");
-        require(agreement.isActive, "Agreement is not active");
-
-        Offer storage offer = offers[agreement.offerId];
+        require(agreement.isActive, "Agreement not active");
+        require(!agreement.funded, "Agreement already funded");
         require(
-            msg.sender == agreement.buyer,
-            "Only buyer can start the energy transfer"
+            block.timestamp <= agreement.fundingDeadline,
+            "Funding deadline passed"
         );
+        require(msg.sender == agreement.buyer, "Only buyer can fund");
 
-        // Transfer tokens to escrow
         require(
             energyToken.transferFrom(
                 agreement.buyer,
                 address(escrowContract),
                 agreement.finalTotalPrice
             ),
-            "Token transfer to escrow failed"
+            "Token transfer failed"
+        );
+        agreement.funded = true;
+        escrowContract.startEscrow(agreement.escrowId);
+        emit AgreementFunded(_agreementId);
+    }
+
+    /**
+     * @dev Start the energy transfer process
+     * @param _agreementId ID of the agreement
+     */
+    function startEnergyTransfer(
+        bytes32 _agreementId
+    ) external whenNotPaused nonReentrant onlyRole(USER_ROLE) {
+        Agreement storage agreement = agreements[_agreementId];
+        require(agreement.id == _agreementId, "Agreement does not exist");
+        require(agreement.isActive, "Agreement not active");
+        require(agreement.funded, "Agreement not funded");
+        require(msg.sender == agreement.buyer, "Only buyer can start transfer");
+
+        // At this point, energy transfer (and the subsequent escrow releases) can proceed.
+        // For example, update offer status and perform any necessary preparations.
+        Offer storage offer = offers[agreement.offerId];
+        offer.status = OfferStatus.IN_PROGRESS;
+
+        emit EnergyDeliveryProgress(_agreementId, 0);
+    }
+
+    /**
+     * @notice Cancels an unfunded agreement if the funding deadline has expired.
+     * @dev This function can only be called when the contract is not paused and is non-reentrant.
+     * @param _agreementId The ID of the agreement to cancel.
+     * Requirements:
+     * - The agreement must exist.
+     * - The agreement must be active.
+     * - The agreement must not be funded.
+     * - The funding deadline must have expired.
+     * - The caller must be the buyer, seller, or an authorized admin or moderator.
+     * Emits:
+     * - AgreementCancelled event when the agreement is successfully cancelled.
+     * - OfferUpdated event when the associated offer is reactivated.
+     */
+    function cancelUnfundedAgreement(
+        bytes32 _agreementId
+    ) external whenNotPaused nonReentrant onlyRole(USER_ROLE) {
+        Agreement storage agreement = agreements[_agreementId];
+        require(agreement.id == _agreementId, "Agreement does not exist");
+        require(agreement.isActive, "Agreement not active");
+        require(!agreement.funded, "Agreement already funded");
+        require(
+            block.timestamp > agreement.fundingDeadline,
+            "Funding deadline not expired"
         );
 
-        // Update offer status
-        offer.status = OfferStatus.IN_PROGRESS;
-        emit OfferUpdated(agreement.offerId, OfferStatus.IN_PROGRESS);
+        // Allow buyer, seller, or admin to cancel.
+        require(
+            msg.sender == agreement.buyer ||
+                msg.sender == agreement.seller ||
+                hasRole(ADMIN_ROLE, msg.sender) ||
+                hasRole(MODERATOR_ROLE, msg.sender),
+            "Not authorized to cancel"
+        );
 
-        // Start escrow
-        escrowContract.startEscrow(agreement.escrowId);
+        agreement.isActive = false;
+        // Reactivate the original offer.
+        Offer storage offer = offers[agreement.offerId];
+        offer.status = OfferStatus.ACTIVE;
+        offer.counterparty = address(0);
+        activeOfferIds.push(offer.id);
+        activeOfferIndexes[offer.id] = activeOfferIds.length - 1;
+
+        emit AgreementCancelled(_agreementId, "Funding deadline expired");
+        emit OfferUpdated(offer.id, OfferStatus.ACTIVE);
     }
 
     /**
@@ -448,7 +590,7 @@ contract EnergyMarketplace is
     function reportEnergyDelivery(
         bytes32 _agreementId,
         uint256 _percentage
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused nonReentrant onlyRole(MODERATOR_ROLE) {
         Agreement storage agreement = agreements[_agreementId];
         require(agreement.id == _agreementId, "Agreement does not exist");
         require(agreement.isActive, "Agreement is not active");
@@ -505,7 +647,7 @@ contract EnergyMarketplace is
     function disputeAndRefund(
         bytes32 _agreementId,
         string calldata _reason
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused nonReentrant onlyRole(MODERATOR_ROLE) {
         Agreement storage agreement = agreements[_agreementId];
         require(agreement.id == _agreementId, "Agreement does not exist");
         require(agreement.isActive, "Agreement is not active");
@@ -527,7 +669,12 @@ contract EnergyMarketplace is
      * @dev Get all active offers
      * @return Array of active offer IDs
      */
-    function getActiveOffers() external view returns (bytes32[] memory) {
+    function getActiveOffers()
+        external
+        view
+        onlyRole(USER_ROLE)
+        returns (bytes32[] memory)
+    {
         return activeOfferIds;
     }
 
@@ -538,7 +685,7 @@ contract EnergyMarketplace is
      */
     function getNegotiationMessages(
         bytes32 _offerId
-    ) external view returns (NegotiationMessage[] memory) {
+    ) external view onlyRole(USER_ROLE) returns (NegotiationMessage[] memory) {
         return negotiations[_offerId];
     }
 
@@ -549,7 +696,7 @@ contract EnergyMarketplace is
      */
     function getUserOffers(
         address _user
-    ) external view returns (bytes32[] memory) {
+    ) external view onlyRole(USER_ROLE) returns (bytes32[] memory) {
         return userOffers[_user];
     }
 
@@ -560,7 +707,7 @@ contract EnergyMarketplace is
      */
     function getUserAgreements(
         address _user
-    ) external view returns (bytes32[] memory) {
+    ) external view onlyRole(USER_ROLE) returns (bytes32[] memory) {
         return userAgreements[_user];
     }
 
@@ -609,6 +756,14 @@ contract EnergyMarketplace is
      */
     function addAdmin(address _account) external onlyRole(ADMIN_ROLE) {
         grantRole(ADMIN_ROLE, _account);
+    }
+
+    /**
+     * @dev Grant user role to an address
+     * @param _account Address to grant the role to
+     */
+    function addUser(address _account) external onlyRole(ADMIN_ROLE) {
+        grantRole(USER_ROLE, _account);
     }
 
     /**
@@ -683,7 +838,7 @@ contract EnergyMarketplace is
         bytes32 _agreementId,
         uint256 _percentage,
         string calldata _reason
-    ) external whenNotPaused nonReentrant {
+    ) external whenNotPaused nonReentrant onlyRole(USER_ROLE) {
         Agreement storage agreement = agreements[_agreementId];
         require(agreement.id == _agreementId, "Agreement does not exist");
         require(agreement.isActive, "Agreement is not active");
@@ -706,5 +861,23 @@ contract EnergyMarketplace is
         milestone.canDispute = false;
 
         emit MilestoneDisputed(_agreementId, _percentage, _reason);
+    }
+
+    function resolveDispute(
+        bytes32 _agreementId,
+        uint256 _percentage,
+        bool buyerWins
+    ) external onlyRole(ADMIN_ROLE) {
+        Agreement storage agreement = agreements[_agreementId];
+        require(agreement.id == _agreementId, "Agreement does not exist");
+
+        if (buyerWins) {
+            escrowContract.processRefund(agreement.escrowId);
+            agreement.isActive = false;
+            emit TradeRefunded(_agreementId, "Admin resolved in buyer's favor");
+        } else {
+            escrowContract.releasePayment(agreement.escrowId, _percentage);
+            emit EnergyDeliveryProgress(_agreementId, _percentage);
+        }
     }
 }
