@@ -29,19 +29,22 @@ async function main() {
     console.log("Deploying EnergyEscrow...");
     const escrow = await EnergyEscrow.deploy(tokenAddress);
 
-    // Wait for deployment to complete
-    await escrow.deployed();
-    console.log(`EnergyEscrow deployed to: ${escrow.address}`);
+    // Wait for deployment to complete - updated for ethers v6
+    console.log("Waiting for deployment transaction confirmation...");
+    await escrow.waitForDeployment();
+    const escrowAddress = await escrow.getAddress();
+
+    console.log(`EnergyEscrow deployed to: ${escrowAddress}`);
 
     // Update .env file with the new contract address
-    updateEnvFile(networkName, escrow.address);
+    updateEnvFile(networkName, escrowAddress);
 
     console.log("Deployment completed successfully!");
 
     // Log verification command
     console.log("\nTo verify this contract on Etherscan, run:");
     console.log(
-      `npx hardhat verify --network ${hre.network.name} ${escrow.address} ${tokenAddress}`
+      `npx hardhat verify --network ${hre.network.name} ${escrowAddress} ${tokenAddress}`
     );
   } catch (error) {
     console.error("Deployment failed:", error);

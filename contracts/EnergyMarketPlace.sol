@@ -26,7 +26,7 @@ contract EnergyMarketplace is
     uint256 public constant DISPUTE_PERIOD = 24 hours;
 
     // Funding timeout: buyer must fund within 24 hours
-    uint256 public constant FUNDING_TIMEOUT = 24 hours;
+    uint256 public constant FUNDING_TIMEOUT = 1 hours;
 
     // Reference to the energy token
     EnergyToken public energyToken;
@@ -80,6 +80,14 @@ contract EnergyMarketplace is
         uint256 proposedEnergyAmount; // 0 if not proposing a new amount
     }
 
+    // Add a new struct to track negotiations by counterparty
+    struct OfferNegotiation {
+        bool isActive;
+        address counterparty;
+        uint256 latestProposalIndex; // Index into the negotiations array
+        uint256 startedAt;
+    }
+
     // Struct to represent a trade agreement
     struct Agreement {
         bytes32 id;
@@ -117,6 +125,11 @@ contract EnergyMarketplace is
     // Set of all active offer IDs
     bytes32[] public activeOfferIds;
     mapping(bytes32 => uint256) private activeOfferIndexes;
+
+    // Add mapping to track active negotiations per offer
+    mapping(bytes32 => mapping(address => OfferNegotiation))
+        public offerNegotiations;
+    mapping(bytes32 => address[]) public offerNegotiators;
 
     // Events
     event OfferCreated(
@@ -290,11 +303,28 @@ contract EnergyMarketplace is
             "Offer not open for negotiation"
         );
 
+        // Create or update negotiation record for this counterparty
+        if (
+            !offerNegotiations[_offerId][msg.sender].isActive &&
+            msg.sender != offer.creator
+        ) {
+            offerNegotiations[_offerId][msg.sender] = OfferNegotiation({
+                isActive: true,
+                counterparty: msg.sender,
+                latestProposalIndex: negotiations[_offerId].length, // Will be updated
+                startedAt: block.timestamp
+            });
+            offerNegotiators[_offerId].push(msg.sender);
+        }
+
+        // Update offer status if this is the first negotiation
         if (offer.status == OfferStatus.ACTIVE) {
             offer.status = OfferStatus.NEGOTIATING;
             emit OfferUpdated(_offerId, OfferStatus.NEGOTIATING);
         }
 
+        // Add the negotiation message
+        uint256 newIndex = negotiations[_offerId].length;
         negotiations[_offerId].push(
             NegotiationMessage({
                 sender: msg.sender,
@@ -304,15 +334,24 @@ contract EnergyMarketplace is
                 proposedEnergyAmount: _proposedEnergyAmount
             })
         );
+
+        // Update the latest proposal index for this negotiator
+        if (msg.sender != offer.creator) {
+            offerNegotiations[_offerId][msg.sender]
+                .latestProposalIndex = newIndex;
+        }
+
         emit NegotiationMessageAdded(_offerId, msg.sender);
     }
 
     /**
      * @dev Accept a negotiation and proceed to agreement
      * @param _offerId ID of the offer
+     * @param _counterparty Address of the counterparty
      */
     function acceptNegotiation(
-        bytes32 _offerId
+        bytes32 _offerId,
+        address _counterparty
     ) external whenNotPaused nonReentrant {
         Offer storage offer = offers[_offerId];
 
@@ -322,17 +361,37 @@ contract EnergyMarketplace is
             "Offer is not in negotiation"
         );
         require(
-            offer.counterparty == msg.sender,
-            "Only the designated counterparty can accept"
+            msg.sender == offer.creator,
+            "Only offer creator can accept negotiation"
         );
         require(
-            msg.sender != offer.creator,
-            "Offer creator cannot accept their own negotiation"
+            offerNegotiations[_offerId][_counterparty].isActive,
+            "No active negotiation with counterparty"
         );
 
         // Set the counterparty and update status to AGREED
-        offer.counterparty = msg.sender;
+        offer.counterparty = _counterparty;
         offer.status = OfferStatus.AGREED;
+
+        // Get the latest proposal details from this counterparty
+        uint256 latestIndex = offerNegotiations[_offerId][_counterparty]
+            .latestProposalIndex;
+        NegotiationMessage memory latestProposal = negotiations[_offerId][
+            latestIndex
+        ];
+
+        if (latestProposal.proposedPrice > 0) {
+            offer.pricePerUnit = latestProposal.proposedPrice;
+            offer.totalPrice =
+                latestProposal.proposedPrice *
+                offer.energyAmount;
+        }
+        if (latestProposal.proposedEnergyAmount > 0) {
+            offer.energyAmount = latestProposal.proposedEnergyAmount;
+            offer.totalPrice =
+                offer.pricePerUnit *
+                latestProposal.proposedEnergyAmount;
+        }
 
         emit OfferUpdated(_offerId, OfferStatus.AGREED);
     }
@@ -340,9 +399,11 @@ contract EnergyMarketplace is
     /**
      * @dev Cancel a negotiation and revert to active status
      * @param _offerId ID of the offer
+     * @param _counterparty Address of the counterparty
      */
     function cancelNegotiation(
-        bytes32 _offerId
+        bytes32 _offerId,
+        address _counterparty
     ) external whenNotPaused nonReentrant {
         Offer storage offer = offers[_offerId];
 
@@ -356,11 +417,45 @@ contract EnergyMarketplace is
             "Offer is not in negotiation"
         );
 
-        // Reset status back to ACTIVE
-        offer.status = OfferStatus.ACTIVE;
-        offer.counterparty = address(0); // Clear counterparty
+        // If counterparty is zero address, cancel all negotiations
+        if (_counterparty == address(0)) {
+            // Remove all active negotiations
+            for (uint i = 0; i < offerNegotiators[_offerId].length; i++) {
+                address negotiator = offerNegotiators[_offerId][i];
+                if (offerNegotiations[_offerId][negotiator].isActive) {
+                    offerNegotiations[_offerId][negotiator].isActive = false;
+                }
+            }
 
-        emit OfferUpdated(_offerId, OfferStatus.ACTIVE);
+            // Reset status back to ACTIVE
+            offer.status = OfferStatus.ACTIVE;
+            offer.counterparty = address(0); // Clear counterparty
+        } else {
+            // Cancel specific negotiation
+            require(
+                offerNegotiations[_offerId][_counterparty].isActive,
+                "No active negotiation with counterparty"
+            );
+            offerNegotiations[_offerId][_counterparty].isActive = false;
+
+            // Check if there are any active negotiations left
+            bool hasActiveNegotiations = false;
+            for (uint i = 0; i < offerNegotiators[_offerId].length; i++) {
+                address negotiator = offerNegotiators[_offerId][i];
+                if (offerNegotiations[_offerId][negotiator].isActive) {
+                    hasActiveNegotiations = true;
+                    break;
+                }
+            }
+
+            // If no active negotiations left, reset offer status to ACTIVE
+            if (!hasActiveNegotiations) {
+                offer.status = OfferStatus.ACTIVE;
+                offer.counterparty = address(0);
+            }
+        }
+
+        emit OfferUpdated(_offerId, offer.status);
     }
 
     /**
@@ -413,19 +508,8 @@ contract EnergyMarketplace is
             _finalPrice
         );
 
+        // Remove the automatic funding for BUY offers
         bool isFunded = false;
-        // If the buyer creates the agreement, perform immediate funding.
-        require(
-            energyToken.transferFrom(
-                buyer,
-                address(escrowContract),
-                _finalPrice
-            ),
-            "Token transfer to escrow failed"
-        );
-        escrowContract.startEscrow(escrowId);
-        isFunded = true;
-        emit AgreementFunded(agreementId);
 
         // Update offer status and link the counterparty.
         offer.status = OfferStatus.AGREED;
@@ -595,10 +679,6 @@ contract EnergyMarketplace is
         require(agreement.id == _agreementId, "Agreement does not exist");
         require(agreement.isActive, "Agreement is not active");
         require(
-            msg.sender == agreement.seller,
-            "Only seller can report energy delivery"
-        );
-        require(
             _percentage == 25 ||
                 _percentage == 50 ||
                 _percentage == 75 ||
@@ -709,6 +789,32 @@ contract EnergyMarketplace is
         address _user
     ) external view onlyRole(USER_ROLE) returns (bytes32[] memory) {
         return userAgreements[_user];
+    }
+
+    // New function to get all active negotiators for an offer
+    function getOfferNegotiators(
+        bytes32 _offerId
+    ) external view returns (address[] memory) {
+        address[] memory activeNegotiators = new address[](
+            offerNegotiators[_offerId].length
+        );
+        uint256 count = 0;
+
+        for (uint i = 0; i < offerNegotiators[_offerId].length; i++) {
+            address negotiator = offerNegotiators[_offerId][i];
+            if (offerNegotiations[_offerId][negotiator].isActive) {
+                activeNegotiators[count] = negotiator;
+                count++;
+            }
+        }
+
+        // Create correctly sized array
+        address[] memory result = new address[](count);
+        for (uint i = 0; i < count; i++) {
+            result[i] = activeNegotiators[i];
+        }
+
+        return result;
     }
 
     // ============= Admin functions =============
