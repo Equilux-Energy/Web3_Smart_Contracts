@@ -7,7 +7,7 @@
 ![Status](https://img.shields.io/badge/Status-Development-orange)
 
 <p align="center">
-  <img src="https://via.placeholder.com/800x400?text=Equilux+Energy+Platform" alt="Equilux Energy Platform" width="800"/>
+  <img src="https://cryptologos.cc/logos/ethereum-eth-logo.png" alt="Equilux Energy Platform" width="800"/>
 </p>
 
 ## 🔋 Overview
