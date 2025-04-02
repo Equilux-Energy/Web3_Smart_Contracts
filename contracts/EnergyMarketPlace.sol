@@ -34,6 +34,35 @@ contract EnergyMarketplace is
     // Reference to the escrow contract
     EnergyEscrow public escrowContract;
 
+    // Maximum username length to prevent gas issues
+    uint256 public constant MAX_USERNAME_LENGTH = 32;
+
+    // Mapping to store usernames by address
+    mapping(address => string) public usernames;
+    
+    // Mapping from username to address to check if username exists
+    mapping(string => address) private usernameToAddress;
+    
+    // New struct to track user statistics and history
+    struct UserProfile {
+        uint256 offersCreated;
+        uint256 offersNegotiated;
+        uint256 agreementsCompleted;
+        uint256 agreementsCancelled;
+        uint256 disputesInitiated;
+        uint256 disputesWon;
+        uint256 totalEnergyTraded;
+        uint256 totalValueTraded;
+        uint256 lastActivityTimestamp;
+    }
+    
+    // Mapping to store user profiles
+    mapping(address => UserProfile) public userProfiles;
+
+    // New event for username registration
+    event UsernameRegistered(address indexed user, string username);
+    event UsernameUpdated(address indexed user, string oldUsername, string newUsername);
+
     // Enum for offer type
     enum OfferType {
         BUY,
@@ -60,6 +89,7 @@ contract EnergyMarketplace is
     struct Offer {
         bytes32 id;
         address creator;
+        string creatorUsername;    // Store username for easier identification
         OfferType offerType;
         uint256 energyAmount; // in kWh
         uint256 pricePerUnit; // price in tokens per kWh
@@ -68,12 +98,14 @@ contract EnergyMarketplace is
         uint256 endTime;
         OfferStatus status;
         address counterparty; // Address of the trading partner once agreed
+        string counterpartyUsername; // Username of counterparty
         uint256 createdAt;
     }
 
     // Struct to represent a negotiation message
     struct NegotiationMessage {
         address sender;
+        string senderUsername;    // Add sender username
         uint256 timestamp;
         string message;
         uint256 proposedPrice; // 0 if not proposing a new price
@@ -84,6 +116,7 @@ contract EnergyMarketplace is
     struct OfferNegotiation {
         bool isActive;
         address counterparty;
+        string counterpartyUsername;  // Add counterparty username
         uint256 latestProposalIndex; // Index into the negotiations array
         uint256 startedAt;
     }
@@ -93,7 +126,9 @@ contract EnergyMarketplace is
         bytes32 id;
         bytes32 offerId;
         address buyer;
+        string buyerUsername;     // Add buyer username
         address seller;
+        string sellerUsername;    // Add seller username
         uint256 finalEnergyAmount;
         uint256 finalTotalPrice;
         uint256 agreedAt;
@@ -135,15 +170,18 @@ contract EnergyMarketplace is
     event OfferCreated(
         bytes32 indexed offerId,
         address indexed creator,
+        string creatorUsername,
         OfferType offerType
     );
     event OfferUpdated(bytes32 indexed offerId, OfferStatus status);
-    event NegotiationMessageAdded(bytes32 indexed offerId, address sender);
+    event NegotiationMessageAdded(bytes32 indexed offerId, address sender, string senderUsername);
     event AgreementCreated(
         bytes32 indexed agreementId,
         bytes32 indexed offerId,
         address buyer,
-        address seller
+        string buyerUsername,
+        address seller,
+        string sellerUsername
     );
     event EnergyDeliveryProgress(
         bytes32 indexed agreementId,
@@ -171,6 +209,67 @@ contract EnergyMarketplace is
         // Setup roles
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
+    }
+    
+    /**
+     * @dev Register or update a username for the calling user
+     * @param _username The username to register
+     */
+    function registerUsername(string calldata _username) external whenNotPaused onlyRole(USER_ROLE) {
+        require(bytes(_username).length > 0, "Username cannot be empty");
+        require(bytes(_username).length <= MAX_USERNAME_LENGTH, "Username too long");
+        require(usernameToAddress[_username] == address(0) || usernameToAddress[_username] == msg.sender, 
+                "Username already taken");
+                
+        // Check if user is updating an existing username
+        string memory oldUsername = usernames[msg.sender];
+        
+        if (bytes(oldUsername).length > 0) {
+            // Clear old username mapping
+            delete usernameToAddress[oldUsername];
+            emit UsernameUpdated(msg.sender, oldUsername, _username);
+        } else {
+            emit UsernameRegistered(msg.sender, _username);
+        }
+        
+        // Update mappings
+        usernames[msg.sender] = _username;
+        usernameToAddress[_username] = msg.sender;
+        
+        // Initialize user profile if it doesn't exist
+        if (userProfiles[msg.sender].lastActivityTimestamp == 0) {
+            userProfiles[msg.sender] = UserProfile({
+                offersCreated: 0,
+                offersNegotiated: 0,
+                agreementsCompleted: 0,
+                agreementsCancelled: 0,
+                disputesInitiated: 0,
+                disputesWon: 0,
+                totalEnergyTraded: 0,
+                totalValueTraded: 0,
+                lastActivityTimestamp: block.timestamp
+            });
+        } else {
+            userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
+        }
+    }
+    
+    /**
+     * @dev Get a user's username
+     * @param _user The address of the user
+     * @return The username associated with the address, or empty if not registered
+     */
+    function getUsernameByAddress(address _user) public view returns (string memory) {
+        return usernames[_user];
+    }
+    
+    /**
+     * @dev Get a user's address by their username
+     * @param _username The username to look up
+     * @return The address associated with the username, or zero address if not registered
+     */
+    function getAddressByUsername(string calldata _username) public view returns (address) {
+        return usernameToAddress[_username];
     }
 
     /**
@@ -222,12 +321,17 @@ contract EnergyMarketplace is
         require(_pricePerUnit > 0, "Price per unit must be > 0");
         require(_endTime > _startTime, "End time must be after start time");
         require(_startTime > block.timestamp, "Start time must be in future");
+        
+        // Ensure user has registered a username
+        string memory creatorUsername = usernames[msg.sender];
+        require(bytes(creatorUsername).length > 0, "Must register username first");
 
         uint256 totalPrice = _energyAmount * _pricePerUnit;
         offerId = generateUniqueId(msg.sender, uint256(uint160(_offerType)));
         offers[offerId] = Offer({
             id: offerId,
             creator: msg.sender,
+            creatorUsername: creatorUsername,
             offerType: _offerType,
             energyAmount: _energyAmount,
             pricePerUnit: _pricePerUnit,
@@ -236,13 +340,20 @@ contract EnergyMarketplace is
             endTime: _endTime,
             status: OfferStatus.ACTIVE,
             counterparty: address(0),
+            counterpartyUsername: "",
             createdAt: block.timestamp
         });
 
         userOffers[msg.sender].push(offerId);
         activeOfferIds.push(offerId);
         activeOfferIndexes[offerId] = activeOfferIds.length - 1;
-        emit OfferCreated(offerId, msg.sender, _offerType);
+        
+        // Update user profile statistics
+        UserProfile storage profile = userProfiles[msg.sender];
+        profile.offersCreated += 1;
+        profile.lastActivityTimestamp = block.timestamp;
+        
+        emit OfferCreated(offerId, msg.sender, creatorUsername, _offerType);
         return offerId;
     }
 
@@ -277,6 +388,9 @@ contract EnergyMarketplace is
         offer.totalPrice = _energyAmount * _pricePerUnit;
         offer.startTime = _startTime;
         offer.endTime = _endTime;
+        
+        // Update user profile's last activity timestamp
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
         emit OfferUpdated(_offerId, offer.status);
     }
@@ -288,7 +402,6 @@ contract EnergyMarketplace is
      * @param _proposedPrice New proposed price (0 if not proposing a new price)
      * @param _proposedEnergyAmount New proposed energy amount (0 if not proposing a new amount)
      */
-    // A user can add a negotiation message that may propose modifications to the price or energy amount.
     function addNegotiationMessage(
         bytes32 _offerId,
         string calldata _message,
@@ -302,6 +415,10 @@ contract EnergyMarketplace is
                 offer.status == OfferStatus.NEGOTIATING,
             "Offer not open for negotiation"
         );
+        
+        // Get username of sender
+        string memory senderUsername = usernames[msg.sender];
+        require(bytes(senderUsername).length > 0, "Must register username first");
 
         // Create or update negotiation record for this counterparty
         if (
@@ -311,10 +428,16 @@ contract EnergyMarketplace is
             offerNegotiations[_offerId][msg.sender] = OfferNegotiation({
                 isActive: true,
                 counterparty: msg.sender,
+                counterpartyUsername: senderUsername,
                 latestProposalIndex: negotiations[_offerId].length, // Will be updated
                 startedAt: block.timestamp
             });
             offerNegotiators[_offerId].push(msg.sender);
+            
+            // Update user profile stats for negotiation
+            UserProfile storage profile = userProfiles[msg.sender];
+            profile.offersNegotiated += 1;
+            profile.lastActivityTimestamp = block.timestamp;
         }
 
         // Update offer status if this is the first negotiation
@@ -323,11 +446,12 @@ contract EnergyMarketplace is
             emit OfferUpdated(_offerId, OfferStatus.NEGOTIATING);
         }
 
-        // Add the negotiation message
+        // Add the negotiation message with username
         uint256 newIndex = negotiations[_offerId].length;
         negotiations[_offerId].push(
             NegotiationMessage({
                 sender: msg.sender,
+                senderUsername: senderUsername,
                 timestamp: block.timestamp,
                 message: _message,
                 proposedPrice: _proposedPrice,
@@ -340,8 +464,11 @@ contract EnergyMarketplace is
             offerNegotiations[_offerId][msg.sender]
                 .latestProposalIndex = newIndex;
         }
+        
+        // Update last activity timestamp
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
-        emit NegotiationMessageAdded(_offerId, msg.sender);
+        emit NegotiationMessageAdded(_offerId, msg.sender, senderUsername);
     }
 
     /**
@@ -368,9 +495,14 @@ contract EnergyMarketplace is
             offerNegotiations[_offerId][_counterparty].isActive,
             "No active negotiation with counterparty"
         );
+        
+        // Get counterparty username
+        string memory counterpartyUsername = usernames[_counterparty];
+        require(bytes(counterpartyUsername).length > 0, "Counterparty must have username");
 
         // Set the counterparty and update status to AGREED
         offer.counterparty = _counterparty;
+        offer.counterpartyUsername = counterpartyUsername;
         offer.status = OfferStatus.AGREED;
 
         // Get the latest proposal details from this counterparty
@@ -392,6 +524,9 @@ contract EnergyMarketplace is
                 offer.pricePerUnit *
                 latestProposal.proposedEnergyAmount;
         }
+        
+        // Update user profile's last activity timestamp
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
         emit OfferUpdated(_offerId, OfferStatus.AGREED);
     }
@@ -430,6 +565,7 @@ contract EnergyMarketplace is
             // Reset status back to ACTIVE
             offer.status = OfferStatus.ACTIVE;
             offer.counterparty = address(0); // Clear counterparty
+            offer.counterpartyUsername = ""; // Clear counterparty username
         } else {
             // Cancel specific negotiation
             require(
@@ -452,8 +588,12 @@ contract EnergyMarketplace is
             if (!hasActiveNegotiations) {
                 offer.status = OfferStatus.ACTIVE;
                 offer.counterparty = address(0);
+                offer.counterpartyUsername = "";
             }
         }
+        
+        // Update user profile's last activity timestamp
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
         emit OfferUpdated(_offerId, offer.status);
     }
@@ -482,16 +622,27 @@ contract EnergyMarketplace is
         );
 
         require(_finalEnergyAmount > 0, "Energy amount must be > 0");
+        
+        // Get caller's username
+        string memory callerUsername = usernames[msg.sender];
+        require(bytes(callerUsername).length > 0, "Must register username first");
 
         address buyer;
+        string memory buyerUsername;
         address seller;
+        string memory sellerUsername;
+        
         if (offer.offerType == OfferType.BUY) {
             buyer = offer.creator;
+            buyerUsername = offer.creatorUsername;
             seller = msg.sender;
+            sellerUsername = callerUsername;
             require(msg.sender != buyer, "Cannot agree to your own offer");
         } else {
             seller = offer.creator;
+            sellerUsername = offer.creatorUsername;
             buyer = msg.sender;
+            buyerUsername = callerUsername;
             require(msg.sender != seller, "Cannot agree to your own offer");
         }
 
@@ -514,13 +665,16 @@ contract EnergyMarketplace is
         // Update offer status and link the counterparty.
         offer.status = OfferStatus.AGREED;
         offer.counterparty = msg.sender;
+        offer.counterpartyUsername = callerUsername;
         _removeFromActiveOffers(_offerId);
 
         Agreement storage newAgreement = agreements[agreementId];
         newAgreement.id = agreementId;
         newAgreement.offerId = _offerId;
         newAgreement.buyer = buyer;
+        newAgreement.buyerUsername = buyerUsername;
         newAgreement.seller = seller;
+        newAgreement.sellerUsername = sellerUsername;
         newAgreement.finalEnergyAmount = _finalEnergyAmount;
         newAgreement.finalTotalPrice = _finalPrice;
         newAgreement.agreedAt = block.timestamp;
@@ -531,7 +685,12 @@ contract EnergyMarketplace is
 
         userAgreements[buyer].push(agreementId);
         userAgreements[seller].push(agreementId);
-        emit AgreementCreated(agreementId, _offerId, buyer, seller);
+        
+        // Update activity timestamp for both parties
+        userProfiles[buyer].lastActivityTimestamp = block.timestamp;
+        userProfiles[seller].lastActivityTimestamp = block.timestamp;
+        
+        emit AgreementCreated(agreementId, _offerId, buyer, buyerUsername, seller, sellerUsername);
         emit OfferUpdated(_offerId, OfferStatus.AGREED);
         return agreementId;
     }
@@ -555,22 +714,8 @@ contract EnergyMarketplace is
     }
 
     /**
-
-     *  Funds an existing agreement.
-     * @dev This function can only be called by the buyer of the agreement.
-     * It transfers the final total price of the agreement from the buyer to the escrow contract.
-     * The agreement must be active, not already funded, and within the funding deadline.
-     * The contract must not be paused and the function is non-reentrant.
+     * @dev Funds an existing agreement.
      * @param _agreementId The unique identifier of the agreement to be funded.
-     * Requirements:
-     * The agreement must exist.
-     * The agreement must be active.
-     * The agreement must not already be funded.
-     * The current timestamp must be before or equal to the funding deadline.
-     * The caller must be the buyer of the agreement.
-     * The token transfer from the buyer to the escrow contract must succeed.
-     * Emits:
-     * AgreementFunded Emitted when the agreement is successfully funded.
      */
     function fundAgreement(
         bytes32 _agreementId
@@ -595,6 +740,10 @@ contract EnergyMarketplace is
         );
         agreement.funded = true;
         escrowContract.startEscrow(agreement.escrowId);
+        
+        // Update buyer profile's last activity timestamp
+        userProfiles[agreement.buyer].lastActivityTimestamp = block.timestamp;
+        
         emit AgreementFunded(_agreementId);
     }
 
@@ -615,23 +764,16 @@ contract EnergyMarketplace is
         // For example, update offer status and perform any necessary preparations.
         Offer storage offer = offers[agreement.offerId];
         offer.status = OfferStatus.IN_PROGRESS;
+        
+        // Update user profile's last activity timestamp
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
         emit EnergyDeliveryProgress(_agreementId, 0);
     }
 
     /**
      * @notice Cancels an unfunded agreement if the funding deadline has expired.
-     * @dev This function can only be called when the contract is not paused and is non-reentrant.
      * @param _agreementId The ID of the agreement to cancel.
-     * Requirements:
-     * - The agreement must exist.
-     * - The agreement must be active.
-     * - The agreement must not be funded.
-     * - The funding deadline must have expired.
-     * - The caller must be the buyer, seller, or an authorized admin or moderator.
-     * Emits:
-     * - AgreementCancelled event when the agreement is successfully cancelled.
-     * - OfferUpdated event when the associated offer is reactivated.
      */
     function cancelUnfundedAgreement(
         bytes32 _agreementId
@@ -659,8 +801,14 @@ contract EnergyMarketplace is
         Offer storage offer = offers[agreement.offerId];
         offer.status = OfferStatus.ACTIVE;
         offer.counterparty = address(0);
+        offer.counterpartyUsername = "";
         activeOfferIds.push(offer.id);
         activeOfferIndexes[offer.id] = activeOfferIds.length - 1;
+        
+        // Update user statistics
+        userProfiles[agreement.buyer].agreementsCancelled += 1;
+        userProfiles[agreement.seller].agreementsCancelled += 1;
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
         emit AgreementCancelled(_agreementId, "Funding deadline expired");
         emit OfferUpdated(offer.id, OfferStatus.ACTIVE);
@@ -714,6 +862,22 @@ contract EnergyMarketplace is
 
         agreement.isActive = false;
         offer.status = OfferStatus.COMPLETED;
+        
+        // Update user statistics
+        UserProfile storage buyerProfile = userProfiles[agreement.buyer];
+        UserProfile storage sellerProfile = userProfiles[agreement.seller];
+        
+        buyerProfile.agreementsCompleted += 1;
+        sellerProfile.agreementsCompleted += 1;
+        
+        // Track total energy and value traded
+        buyerProfile.totalEnergyTraded += agreement.finalEnergyAmount;
+        sellerProfile.totalEnergyTraded += agreement.finalEnergyAmount;
+        buyerProfile.totalValueTraded += agreement.finalTotalPrice;
+        sellerProfile.totalValueTraded += agreement.finalTotalPrice;
+        
+        buyerProfile.lastActivityTimestamp = block.timestamp;
+        sellerProfile.lastActivityTimestamp = block.timestamp;
 
         emit TradeCompleted(_agreementId);
         emit OfferUpdated(agreement.offerId, OfferStatus.COMPLETED);
@@ -731,7 +895,6 @@ contract EnergyMarketplace is
         Agreement storage agreement = agreements[_agreementId];
         require(agreement.id == _agreementId, "Agreement does not exist");
         require(agreement.isActive, "Agreement is not active");
-        require(msg.sender == agreement.buyer, "Only buyer can dispute");
 
         Offer storage offer = offers[agreement.offerId];
 
@@ -746,8 +909,7 @@ contract EnergyMarketplace is
     }
 
     /**
-     * @dev Get all active offers
-     * @return Array of active offer IDs
+     * @dev Get all active offers with username information
      */
     function getActiveOffers()
         external
@@ -756,6 +918,48 @@ contract EnergyMarketplace is
         returns (bytes32[] memory)
     {
         return activeOfferIds;
+    }
+
+    /**
+     * @dev Get active offer details with usernames
+     * @param _offerId The ID of the offer to get details for
+     */
+    function getOfferDetails(bytes32 _offerId) 
+        external 
+        view
+        onlyRole(USER_ROLE) 
+        returns (
+            bytes32 id,
+            address creator,
+            string memory creatorUsername,
+            OfferType offerType,
+            uint256 energyAmount,
+            uint256 pricePerUnit,
+            uint256 totalPrice,
+            uint256 startTime,
+            uint256 endTime,
+            OfferStatus status,
+            address counterparty,
+            string memory counterpartyUsername,
+            uint256 createdAt
+        ) 
+    {
+        Offer storage offer = offers[_offerId];
+        return (
+            offer.id,
+            offer.creator,
+            offer.creatorUsername,
+            offer.offerType,
+            offer.energyAmount,
+            offer.pricePerUnit,
+            offer.totalPrice,
+            offer.startTime,
+            offer.endTime,
+            offer.status,
+            offer.counterparty,
+            offer.counterpartyUsername,
+            offer.createdAt
+        );
     }
 
     /**
@@ -790,31 +994,112 @@ contract EnergyMarketplace is
     ) external view onlyRole(USER_ROLE) returns (bytes32[] memory) {
         return userAgreements[_user];
     }
+    
+    /**
+     * @dev Get agreement details including usernames
+     * @param _agreementId The ID of the agreement to get details for
+     */
+    function getAgreementDetails(bytes32 _agreementId)
+        external
+        view
+        onlyRole(USER_ROLE)
+        returns (
+            bytes32 id,
+            bytes32 offerId,
+            address buyer,
+            string memory buyerUsername,
+            address seller,
+            string memory sellerUsername,
+            uint256 finalEnergyAmount,
+            uint256 finalTotalPrice,
+            uint256 agreedAt,
+            bool isActive,
+            bool funded
+        )
+    {
+        Agreement storage agreement = agreements[_agreementId];
+        require(agreement.id == _agreementId, "Agreement does not exist");
+        
+        return (
+            agreement.id,
+            agreement.offerId,
+            agreement.buyer,
+            agreement.buyerUsername,
+            agreement.seller,
+            agreement.sellerUsername,
+            agreement.finalEnergyAmount,
+            agreement.finalTotalPrice,
+            agreement.agreedAt,
+            agreement.isActive,
+            agreement.funded
+        );
+    }
+    
+    /**
+     * @dev Get user trading statistics
+     * @param _user Address of the user
+     */
+    function getUserStats(address _user)
+        external
+        view
+        returns (
+            string memory username,
+            uint256 offersCreated,
+            uint256 offersNegotiated,
+            uint256 agreementsCompleted,
+            uint256 agreementsCancelled,
+            uint256 disputesInitiated,
+            uint256 disputesWon,
+            uint256 totalEnergyTraded,
+            uint256 totalValueTraded,
+            uint256 lastActivityTimestamp
+        )
+    {
+        UserProfile storage profile = userProfiles[_user];
+        return (
+            usernames[_user],
+            profile.offersCreated,
+            profile.offersNegotiated,
+            profile.agreementsCompleted,
+            profile.agreementsCancelled,
+            profile.disputesInitiated,
+            profile.disputesWon,
+            profile.totalEnergyTraded,
+            profile.totalValueTraded,
+            profile.lastActivityTimestamp
+        );
+    }
 
-    // New function to get all active negotiators for an offer
+    // New function to get all active negotiators for an offer with usernames
     function getOfferNegotiators(
         bytes32 _offerId
-    ) external view returns (address[] memory) {
-        address[] memory activeNegotiators = new address[](
-            offerNegotiators[_offerId].length
-        );
-        uint256 count = 0;
-
+    ) external view returns (address[] memory addresses, string[] memory usernames) {
+        uint256 activeNegotiatorCount = 0;
+        
+        // Count active negotiators first
         for (uint i = 0; i < offerNegotiators[_offerId].length; i++) {
             address negotiator = offerNegotiators[_offerId][i];
             if (offerNegotiations[_offerId][negotiator].isActive) {
-                activeNegotiators[count] = negotiator;
-                count++;
+                activeNegotiatorCount++;
             }
         }
-
-        // Create correctly sized array
-        address[] memory result = new address[](count);
-        for (uint i = 0; i < count; i++) {
-            result[i] = activeNegotiators[i];
+        
+        // Create arrays of correct size
+        addresses = new address[](activeNegotiatorCount);
+        usernames = new string[](activeNegotiatorCount);
+        
+        // Fill arrays with data
+        uint256 index = 0;
+        for (uint i = 0; i < offerNegotiators[_offerId].length; i++) {
+            address negotiator = offerNegotiators[_offerId][i];
+            if (offerNegotiations[_offerId][negotiator].isActive) {
+                addresses[index] = negotiator;
+                usernames[index] = usernames[negotiator];
+                index++;
+            }
         }
-
-        return result;
+        
+        return (addresses, usernames);
     }
 
     // ============= Admin functions =============
@@ -865,11 +1150,36 @@ contract EnergyMarketplace is
     }
 
     /**
-     * @dev Grant user role to an address
+     * @dev Grant user role to an address and optionally set username
      * @param _account Address to grant the role to
+     * @param _username Optional username to set for the user (empty string to skip)
      */
-    function addUser(address _account) external onlyRole(ADMIN_ROLE) {
+    function addUser(address _account, string calldata _username) external onlyRole(ADMIN_ROLE) {
         grantRole(USER_ROLE, _account);
+        
+        // If a username is provided, register it for the user
+        if (bytes(_username).length > 0) {
+            require(bytes(_username).length <= MAX_USERNAME_LENGTH, "Username too long");
+            require(usernameToAddress[_username] == address(0), "Username already taken");
+            
+            usernames[_account] = _username;
+            usernameToAddress[_username] = _account;
+            
+            // Initialize user profile
+            userProfiles[_account] = UserProfile({
+                offersCreated: 0,
+                offersNegotiated: 0,
+                agreementsCompleted: 0,
+                agreementsCancelled: 0,
+                disputesInitiated: 0,
+                disputesWon: 0,
+                totalEnergyTraded: 0,
+                totalValueTraded: 0,
+                lastActivityTimestamp: block.timestamp
+            });
+            
+            emit UsernameRegistered(_account, _username);
+        }
     }
 
     /**
@@ -965,6 +1275,10 @@ contract EnergyMarketplace is
 
         milestone.disputed = true;
         milestone.canDispute = false;
+        
+        // Update user statistics
+        userProfiles[msg.sender].disputesInitiated += 1;
+        userProfiles[msg.sender].lastActivityTimestamp = block.timestamp;
 
         emit MilestoneDisputed(_agreementId, _percentage, _reason);
     }
@@ -980,10 +1294,16 @@ contract EnergyMarketplace is
         if (buyerWins) {
             escrowContract.processRefund(agreement.escrowId);
             agreement.isActive = false;
+            // Update user statistics
+            userProfiles[agreement.buyer].disputesWon += 1;
             emit TradeRefunded(_agreementId, "Admin resolved in buyer's favor");
         } else {
             escrowContract.releasePayment(agreement.escrowId, _percentage);
             emit EnergyDeliveryProgress(_agreementId, _percentage);
         }
+        
+        // Update activity timestamps
+        userProfiles[agreement.buyer].lastActivityTimestamp = block.timestamp;
+        userProfiles[agreement.seller].lastActivityTimestamp = block.timestamp;
     }
 }
