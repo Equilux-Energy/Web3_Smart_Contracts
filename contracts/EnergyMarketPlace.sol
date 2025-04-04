@@ -1015,6 +1015,80 @@ contract EnergyMarketplace is
     }
 
     /**
+     * @dev Get negotiation messages for an offer from a specific address
+     * @param _offerId ID of the offer
+     * @param _userAddress Address of the specific user
+     * @return Array of negotiation messages from the specified user
+     */
+    function getNegotiationMessagesByAddress(
+        bytes32 _offerId,
+        address _userAddress
+    ) external view onlyRole(USER_ROLE) returns (NegotiationMessage[] memory) {
+        // First count how many messages are from this user
+        uint256 messageCount = 0;
+        for (uint i = 0; i < negotiations[_offerId].length; i++) {
+            if (negotiations[_offerId][i].sender == _userAddress) {
+                messageCount++;
+            }
+        }
+
+        // Create a new array of the right size
+        NegotiationMessage[] memory userMessages = new NegotiationMessage[](
+            messageCount
+        );
+
+        // Fill the array with messages from the specific user
+        uint256 currentIndex = 0;
+        for (uint i = 0; i < negotiations[_offerId].length; i++) {
+            if (negotiations[_offerId][i].sender == _userAddress) {
+                userMessages[currentIndex] = negotiations[_offerId][i];
+                currentIndex++;
+            }
+        }
+
+        return userMessages;
+    }
+
+    /**
+     * @dev Get negotiation messages for an offer from a specific username
+     * @param _offerId ID of the offer
+     * @param _username Username of the specific user
+     * @return Array of negotiation messages from the specified username
+     */
+    function getNegotiationMessagesByUsername(
+        bytes32 _offerId,
+        string calldata _username
+    ) external view onlyRole(USER_ROLE) returns (NegotiationMessage[] memory) {
+        // First get the address from username
+        address userAddress = usernameToAddress[_username];
+        require(userAddress != address(0), "Username not registered");
+
+        // Count how many messages are from this user
+        uint256 messageCount = 0;
+        for (uint i = 0; i < negotiations[_offerId].length; i++) {
+            if (negotiations[_offerId][i].sender == userAddress) {
+                messageCount++;
+            }
+        }
+
+        // Create a new array of the right size
+        NegotiationMessage[] memory userMessages = new NegotiationMessage[](
+            messageCount
+        );
+
+        // Fill the array with messages from the specific user
+        uint256 currentIndex = 0;
+        for (uint i = 0; i < negotiations[_offerId].length; i++) {
+            if (negotiations[_offerId][i].sender == userAddress) {
+                userMessages[currentIndex] = negotiations[_offerId][i];
+                currentIndex++;
+            }
+        }
+
+        return userMessages;
+    }
+
+    /**
      * @dev Get offers created by a user
      * @param _user Address of the user
      * @return Array of offer IDs created by the user
